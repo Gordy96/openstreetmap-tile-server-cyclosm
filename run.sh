@@ -12,18 +12,7 @@ function setPostgresPassword() {
     sudo -u postgres psql -c "ALTER USER renderer PASSWORD '${PGPASSWORD:-renderer}'"
 }
 
-if [ "$#" -ne 1 ]; then
-    echo "usage: <import|run>"
-    echo "commands:"
-    echo "    import: Set up the database and import /data.osm.pbf"
-    echo "    run: Runs Apache and renderd to serve tiles at /tile/{z}/{x}/{y}.png"
-    echo "environment variables:"
-    echo "    THREADS: defines number of threads used for importing / tile rendering"
-    echo "    UPDATES: consecutive updates (enabled/disabled)"
-    exit 1
-fi
-
-if [ "$1" = "import" ]; then
+function initDB() {
     # Ensure that database directory is in right state
     chown postgres:postgres -R /var/lib/postgresql
     if [ ! -f /var/lib/postgresql/12/main/PG_VERSION ]; then
@@ -40,6 +29,28 @@ if [ "$1" = "import" ]; then
     sudo -u postgres psql -d gis -c "ALTER TABLE geometry_columns OWNER TO renderer;"
     sudo -u postgres psql -d gis -c "ALTER TABLE spatial_ref_sys OWNER TO renderer;"
     setPostgresPassword
+}
+
+function applyScripts() {
+    for f in $(find /sql/*.sql -type f | sort); do
+        echo "applying $f"
+        sudo -u postgres psql -d gis -f $f
+    done
+}
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: <import|run>"
+    echo "commands:"
+    echo "    import: Set up the database and import /data.osm.pbf"
+    echo "    run: Runs Apache and renderd to serve tiles at /tile/{z}/{x}/{y}.png"
+    echo "environment variables:"
+    echo "    THREADS: defines number of threads used for importing / tile rendering"
+    echo "    UPDATES: consecutive updates (enabled/disabled)"
+    exit 1
+fi
+
+if [ "$1" = "import" ]; then
+    initDB
 
     # Download Luxembourg as sample if no data is provided
     if [ ! -f /data.osm.pbf ] && [ -z "$DOWNLOAD_PBF" ]; then
@@ -75,8 +86,7 @@ if [ "$1" = "import" ]; then
     # Import data
     sudo -u renderer osm2pgsql -d gis --create --slim -G --hstore --number-processes ${THREADS:-4} ${OSM2PGSQL_EXTRA_ARGS} /data.osm.pbf
 
-    # Create indexes
-    sudo -u postgres psql -d gis -f indexes.sql
+    applyScripts
 
     # Register that data has changed for mod_tile caching purposes
     touch /var/lib/mod_tile/planet-import-complete
@@ -85,7 +95,35 @@ if [ "$1" = "import" ]; then
 
     exit 0
 fi
-
+if [ "$1" = "scripts" ]; then
+    applyScripts
+fi
+if [ "$1" = "contours_dl" ]; then
+    #cd /home/renderer/src/cyclosm-cartocss-style/dem
+    cd /contours
+    mono /Srtm2Osm/Srtm2Osm.exe \
+        -cat 400 100 \
+        -large \
+        -bounds1 44.311 22.031 52.413 40.303 \
+        -incrementid \
+        -firstnodeid $(( 1 << 33 )) \
+        -firstwayid $(( 1 << 33 )) \
+        -maxwaynodes 256 \
+        -o /contours/osm/cnt.osm
+    #phyghtmap --polygon=/data.poly -j 2 -s 10 -0 --source=view3 --max-nodes-per-tile=0 --max-nodes-per-way=0 --pbf
+    exit 0
+fi
+if [ "$1" = "contours_import" ]; then
+    initDB
+    # Import contours
+    sudo -u postgres psql -c "DROP DATABASE IF EXISTS contours;"
+    sudo -u postgres createdb -E UTF8 -O renderer contours
+    sudo -u postgres psql -d contours -c "CREATE EXTENSION postgis;"
+    sudo -u renderer osm2pgsql -d contours --slim --cache 5000 --number-processes ${THREADS:-4} --style /home/renderer/src/cyclosm-cartocss-style/dem/contours.style /contours/osm/*
+    sudo -u postgres psql -d contours -c "ALTER TABLE planet_osm_line RENAME COLUMN way TO geometry;"
+    sudo -u postgres psql -d contours -c "ALTER TABLE planet_osm_line RENAME TO contours;"
+    exit 0
+fi
 if [ "$1" = "run" ]; then
     # Clean /tmp
     rm -rf /tmp/*

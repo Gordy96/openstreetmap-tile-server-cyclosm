@@ -1,18 +1,36 @@
-.PHONY: build push test
+.PHONY: build import run
 
-DOCKER_IMAGE=mhajder/openstreetmap-tile-server-cyclosm
+THIS_DIR := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
 
 build:
-	docker build -t ${DOCKER_IMAGE} .
-
-push: build
-	docker push ${DOCKER_IMAGE}:latest
-
-test: build
 	docker volume create openstreetmap-data
-	docker run --rm -v openstreetmap-data:/var/lib/postgresql/12/main ${DOCKER_IMAGE} import
-	docker run --rm -v openstreetmap-data:/var/lib/postgresql/12/main -p 8080:80 -d ${DOCKER_IMAGE} run
+	docker build -t tile-base -f Dockerfile.base .
+	docker build -t tile-server -f Dockerfile .
 
-stop:
-	docker rm -f `docker ps | grep '${DOCKER_IMAGE}' | awk '{ print $$1 }'` || true
-	docker volume rm -f openstreetmap-data
+import: build
+	docker run --rm \
+	-e THREADS=24 \
+	-v ${THIS_DIR}sql:/sql \
+	-v ${THIS_DIR}data.osm.pbf:/data.osm.pbf \
+	-v ${THIS_DIR}data.poly:/data.poly \
+	-v openstreetmap-cyclosm-data:/var/lib/postgresql/12/main \
+	-v ${THIS_DIR}contours:/contours tile-server import
+
+contours_dl: build
+	docker run --rm \
+	-e THREADS=24 \
+	-v ${THIS_DIR}contours:/contours tile-server contours_dl
+
+contours_import: build
+	docker run --rm \
+	-e THREADS=24 \
+	-v openstreetmap-cyclosm-data:/var/lib/postgresql/12/main \
+	-v ${THIS_DIR}contours:/contours tile-server contours_import
+
+run: build
+	docker run \
+	-p 8080:80 \
+	-e THREADS=24 \
+	-v openstreetmap-cyclosm-data:/var/lib/postgresql/12/main \
+	-d tile-server \
+	run
