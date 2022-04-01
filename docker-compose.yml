@@ -1,14 +1,60 @@
 version: '3'
 
-services:
-  map:
-    image: mhajder/openstreetmap-tile-server-cyclosm
-    volumes:
-      - openstreetmap-data:/var/lib/postgresql/12/main
-    ports:
-      - "8080:80"
-    command: "run"
-
 volumes:
-  openstreetmap-data:
+  osm-data:
     external: true
+  tile-cache:
+    external: true
+
+services:
+  server:
+    container_name: tile-server
+    image: tile-server
+    volumes:
+      - tile-cache:/var/lib/mod_tile
+      - ./hs/colored:/home/renderer/src/cyclosm-cartocss-style/dem/hgt
+    depends_on:
+      - db
+    ports:
+      - 8080:80
+    command: run
+    environment:
+      - PGHOST=db
+      - PGUSER=renderer
+      - PGPASSWORD=renderer
+  db:
+    container_name: tile-db
+    image: db
+    mem_limit: 2g
+    build:
+      context: .
+      dockerfile: Dockerfile.db
+    volumes:
+      - osm-data:/var/lib/postgresql/data
+      - ./postgresql.custom.conf:/etc/postgresql/postgresql.conf
+    ports:
+      - 5432:5432
+    command: 
+      - postgres 
+      - -c 
+      - config_file=/etc/postgresql/postgresql.conf
+    environment:
+      - POSTGRES_USER=renderer
+      - POSTGRES_PASSWORD=renderer
+  import:
+    container_name: tile-import
+    image: tile-server
+    mem_limit: 6g
+    volumes:
+      - ./data.osm.pbf:/data.osm.pbf
+      - ./data.poly:/data.poly
+      - ./contours:/contours
+      - ./sql:/sql
+    depends_on:
+      - db
+    environment:
+      - PGDATABASE=gis
+      - PGHOST=db
+      - PGUSER=renderer
+      - PGPASSWORD=renderer
+      - THREADS=24

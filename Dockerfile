@@ -1,32 +1,26 @@
 FROM tile-base:latest
 
-RUN apt-get install -y --no-install-recommends \
- gdal-bin \
- python-gdal \
- geotiff-bin \
- python3-setuptools \
- python3-matplotlib \
- python3-bs4 \
- python3-numpy \
- python3-gdal \
- python3-pip
-
-RUN pip3 install lxml
-
-RUN wget http://katze.tfiu.de/projects/phyghtmap/phyghtmap_2.23-1_all.deb -O phyghtmap.deb \
- && dpkg -i phyghtmap*.deb \
- && apt-get --fix-broken install
+ENV PG_HOST=db
+ENV PG_USER=renderer
+ENV PG_PASSWORD=renderer
+ENV PG_DBNAME=gis
+ENV PG_PORT=5432
 
 COPY simplified-land-polygons-complete-3857.zip /
 COPY land-polygons-split-3857.zip /
 COPY hs/colored /hgt
 COPY hs/smooth.vrt /
+COPY project.mml /
+
+RUN apt -y install postgis
+RUN pip3 install elevation
+
 # Configure stylesheet
 RUN mkdir -p /home/renderer/src \
  && cd /home/renderer/src \
  && rm -rf cyclosm-cartocss-style \
  && git clone https://github.com/Gordy96/cyclosm-cartocss-style.git \
- && git -C cyclosm-cartocss-style checkout a6ee442165d0f4c10f64a69a5db664baa7e97cf2 \
+ && git -C cyclosm-cartocss-style checkout 5c9eab44cbf0dc053d17c55f0ecca0cc72f066ca \
  && cd cyclosm-cartocss-style \
  && rm -rf .git \
  && mkdir data \
@@ -38,11 +32,17 @@ RUN mkdir -p /home/renderer/src \
  && rm /home/renderer/src/cyclosm-cartocss-style/data/*.zip \
  && cd .. \
  && cd dem \
- && cp -R /hgt ./ \
- && gdalbuildvrt full.vrt hgt/*.tif \
- && cp /smooth.vrt shade.vrt \
- && cd .. \
- && sed -i 's/dbname: "osm"/dbname: "gis"/g' project.mml \
+ && mv /hgt ./ \
+ && gdalbuildvrt shade.vrt hgt/*.tif
+ #&& cp /smooth.vrt shade.vrt
+
+RUN cd /home/renderer/src/cyclosm-cartocss-style \
+ && cp /project.mml ./ \
+ && sed -i "s/host: \"{{pg_host}}\"/host: \"${PG_HOST}\"/g" project.mml \
+ && sed -i "s/user: \"{{pg_user}}\"/user: \"${PG_USER}\"/g" project.mml \
+ && sed -i "s/port: \"{{pg_port}}\"/port: \"${PG_PORT}\"/g" project.mml \
+ && sed -i "s/password: \"{{pg_password}}\"/password: \"${PG_PASSWORD}\"/g" project.mml \
+ && sed -i "s/dbname: \"{{pg_dbname}}\"/dbname: \"${PG_DBNAME}\"/g" project.mml \
  && sed -i 's,http://osmdata.openstreetmap.de/download/simplified-land-polygons-complete-3857.zip,data/simplified-land-polygons-complete-3857/simplified_land_polygons.shp,g' project.mml \
  && sed -i 's,http://osmdata.openstreetmap.de/download/land-polygons-split-3857.zip,data/land-polygons-split-3857/land_polygons.shp,g' project.mml \
  && carto project.mml > mapnik.xml
@@ -67,13 +67,6 @@ RUN rm -rf /var/www/html/index.html
 RUN ln -sf /dev/stdout /var/log/apache2/access.log \
  && ln -sf /dev/stderr /var/log/apache2/error.log
 
-# Configure PosgtreSQL
-COPY postgresql.custom.conf.tmpl /etc/postgresql/12/main/
-RUN chown -R postgres:postgres /var/lib/postgresql \
- && chown postgres:postgres /etc/postgresql/12/main/postgresql.custom.conf.tmpl \
- && echo "host all all 0.0.0.0/0 md5" >> /etc/postgresql/12/main/pg_hba.conf \
- && echo "host all all ::/0 md5" >> /etc/postgresql/12/main/pg_hba.conf
-
 # Copy update scripts
 COPY openstreetmap-tiles-update-expire /usr/bin/
 RUN chmod +x /usr/bin/openstreetmap-tiles-update-expire \
@@ -91,20 +84,9 @@ RUN mkdir -p /home/renderer/src \
  && rm -rf .git \
  && chmod u+x /home/renderer/src/regional/trim_osc.py
 
-RUN cd / \
- && apt install -y --no-install-recommends gnupg ca-certificates \
- && apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF \
- && echo "deb https://download.mono-project.com/repo/ubuntu stable-bionic main" | tee /etc/apt/sources.list.d/mono-official-stable.list \
- && apt update \
- && apt install -y mono-complete
-
-RUN wget https://github.com/mibe/Srtm2Osm/releases/download/v1.14/Srtm2Osm-1.14.11.0.zip -O srtm2osm.zip \
- && unzip srtm2osm.zip \
- && rm srtm2osm.zip
-
 # Start running
 COPY run.sh /
 ENTRYPOINT ["/run.sh"]
 CMD []
 
-EXPOSE 80 5432
+EXPOSE 80

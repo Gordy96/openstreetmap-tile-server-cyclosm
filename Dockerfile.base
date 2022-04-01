@@ -61,10 +61,8 @@ RUN apt-get install -y --no-install-recommends \
   node-gyp \
   osmium-tool \
   osmosis \
-  postgis \
   postgresql-12 \
   postgresql-contrib-12 \
-  postgresql-server-dev-12 \
   protobuf-c-compiler \
   python3-mapnik \
   python3-lxml \
@@ -79,17 +77,6 @@ RUN apt-get install -y --no-install-recommends \
 && apt-get clean autoclean \
 && apt-get autoremove --yes \
 && rm -rf /var/lib/{apt,dpkg,cache,log}/
-
-# Set up PostGIS
-RUN wget https://download.osgeo.org/postgis/source/postgis-3.1.1.tar.gz -O postgis.tar.gz \
- && mkdir -p postgis_src \
- && tar -xvzf postgis.tar.gz --strip 1 -C postgis_src \
- && rm postgis.tar.gz \
- && cd postgis_src \
- && ./configure \
- && make -j $(nproc) \
- && make -j $(nproc) install \
- && cd .. && rm -rf postgis_src
 
 # Set up renderer user
 RUN adduser --disabled-password --gecos "" renderer
@@ -131,9 +118,37 @@ RUN mkdir -p /home/renderer/src \
 && cp noto-emoji/fonts/NotoEmoji-Regular.ttf /usr/share/fonts/truetype/noto \
 && rm -rf noto-emoji
 
+RUN apt-get install -y --no-install-recommends \
+ gdal-bin \
+ python-gdal \
+ geotiff-bin \
+ python3-setuptools \
+ python3-matplotlib \
+ python3-bs4 \
+ python3-numpy \
+ python3-gdal \
+ python3-pip
+
+RUN pip3 install lxml
+
+RUN wget http://katze.tfiu.de/projects/phyghtmap/phyghtmap_2.23-1_all.deb -O phyghtmap.deb \
+ && dpkg -i phyghtmap*.deb \
+ && apt-get --fix-broken install
+
+RUN cd / \
+ && apt install -y --no-install-recommends gnupg ca-certificates \
+ && apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF \
+ && echo "deb https://download.mono-project.com/repo/ubuntu stable-bionic main" | tee /etc/apt/sources.list.d/mono-official-stable.list \
+ && apt update \
+ && apt install -y mono-complete
+
+RUN wget https://github.com/mibe/Srtm2Osm/releases/download/v1.14/Srtm2Osm-1.14.11.0.zip -O srtm2osm.zip \
+ && unzip srtm2osm.zip \
+ && rm srtm2osm.zip
+
 RUN npm install -g carto@0.18.2
 
 ENTRYPOINT ["/bin/bash"]
 CMD []
 
-EXPOSE 80 5432
+EXPOSE 80

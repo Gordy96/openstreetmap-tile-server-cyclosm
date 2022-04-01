@@ -2,55 +2,32 @@
 
 set -x
 
-function createPostgresConfig() {
-  cp /etc/postgresql/12/main/postgresql.custom.conf.tmpl /etc/postgresql/12/main/conf.d/postgresql.custom.conf
-  sudo -u postgres echo "autovacuum = $AUTOVACUUM" >> /etc/postgresql/12/main/conf.d/postgresql.custom.conf
-  cat /etc/postgresql/12/main/conf.d/postgresql.custom.conf
-}
-
-function setPostgresPassword() {
-    sudo -u postgres psql -c "ALTER USER renderer PASSWORD '${PGPASSWORD:-renderer}'"
-}
-
-function initDB() {
-    # Ensure that database directory is in right state
-    chown postgres:postgres -R /var/lib/postgresql
-    if [ ! -f /var/lib/postgresql/12/main/PG_VERSION ]; then
-        sudo -u postgres /usr/lib/postgresql/12/bin/pg_ctl -D /var/lib/postgresql/12/main/ initdb -o "--locale C.UTF-8"
+function waitDB() {
+    i=1
+    MAXCOUNT=60
+    echo "Waiting for PostgreSQL to be running"
+    while [ $i -le $MAXCOUNT ]
+    do
+        pg_isready -q && echo "PostgreSQL running" && break
+        sleep 2
+        i=$((i+1))
+    done
+    if [ $i -gt $MAXCOUNT ]; then
+        echo "Timeout while waiting for PostgreSQL to be running"
+        exit 2
     fi
-
-    # Initialize PostgreSQL
-    createPostgresConfig
-    service postgresql start
-    sudo -u postgres createuser renderer
-    sudo -u postgres createdb -E UTF8 -O renderer gis
-    sudo -u postgres psql -d gis -c "CREATE EXTENSION postgis;"
-    sudo -u postgres psql -d gis -c "CREATE EXTENSION hstore;"
-    sudo -u postgres psql -d gis -c "ALTER TABLE geometry_columns OWNER TO renderer;"
-    sudo -u postgres psql -d gis -c "ALTER TABLE spatial_ref_sys OWNER TO renderer;"
-    setPostgresPassword
 }
 
 function applyScripts() {
     for f in $(find /sql/*.sql -type f | sort); do
         echo "applying $f"
-        sudo -u postgres psql -d gis -f $f
+        psql -f $f
     done
 }
 
-if [ "$#" -ne 1 ]; then
-    echo "usage: <import|run>"
-    echo "commands:"
-    echo "    import: Set up the database and import /data.osm.pbf"
-    echo "    run: Runs Apache and renderd to serve tiles at /tile/{z}/{x}/{y}.png"
-    echo "environment variables:"
-    echo "    THREADS: defines number of threads used for importing / tile rendering"
-    echo "    UPDATES: consecutive updates (enabled/disabled)"
-    exit 1
-fi
-
 if [ "$1" = "import" ]; then
-    initDB
+    env
+    waitDB
 
     # Download Luxembourg as sample if no data is provided
     if [ ! -f /data.osm.pbf ] && [ -z "$DOWNLOAD_PBF" ]; then
@@ -68,79 +45,76 @@ if [ "$1" = "import" ]; then
         fi
     fi
 
-    if [ "$UPDATES" = "enabled" ]; then
-        # determine and set osmosis_replication_timestamp (for consecutive updates)
-        osmium fileinfo /data.osm.pbf > /var/lib/mod_tile/data.osm.pbf.info
-        osmium fileinfo /data.osm.pbf | grep 'osmosis_replication_timestamp=' | cut -b35-44 > /var/lib/mod_tile/replication_timestamp.txt
-        REPLICATION_TIMESTAMP=$(cat /var/lib/mod_tile/replication_timestamp.txt)
-
-        # initial setup of osmosis workspace (for consecutive updates)
-        sudo -u renderer openstreetmap-tiles-update-expire $REPLICATION_TIMESTAMP
-    fi
-
     # copy polygon file if available
     if [ -f /data.poly ]; then
         sudo -u renderer cp /data.poly /var/lib/mod_tile/data.poly
     fi
 
     # Import data
-    sudo -u renderer osm2pgsql -d gis --create --slim -G --hstore --number-processes ${THREADS:-4} ${OSM2PGSQL_EXTRA_ARGS} /data.osm.pbf
+    osm2pgsql -d ${PGDATABASE:-gis} --create --slim -G --hstore --number-processes ${THREADS:-4} ${OSM2PGSQL_EXTRA_ARGS} /data.osm.pbf
 
     applyScripts
 
     # Register that data has changed for mod_tile caching purposes
     touch /var/lib/mod_tile/planet-import-complete
 
-    service postgresql stop
-
     exit 0
 fi
 if [ "$1" = "scripts" ]; then
+    waitDB
     applyScripts
+fi
+if [ "$1" = "contours_convert" ]; then
+    osmosis --read-xml /contours/osm/cnt.osm --write-pbf /contours/osm/cnt.osm.pbf
 fi
 if [ "$1" = "contours_dl" ]; then
     #cd /home/renderer/src/cyclosm-cartocss-style/dem
     cd /contours
-    mono /Srtm2Osm/Srtm2Osm.exe \
-        -cat 400 100 \
-        -large \
-        -bounds1 44.311 22.031 52.413 40.303 \
-        -incrementid \
-        -firstnodeid $(( 1 << 33 )) \
-        -firstwayid $(( 1 << 33 )) \
-        -maxwaynodes 256 \
-        -o /contours/osm/cnt.osm
-    #phyghtmap --polygon=/data.poly -j 2 -s 10 -0 --source=view3 --max-nodes-per-tile=0 --max-nodes-per-way=0 --pbf
+    #eio clip -o srtm_30m.tif --bounds 44.311 22.031 52.413 40.303
+    gdal_contour -i 10 -a height srtm.vrt srtm_30m_contours_10m
+    # mono /Srtm2Osm/Srtm2Osm.exe \
+    #     -cat 400 100 \
+    #     -large \
+    #     -bounds1 44.311 22.031 52.413 40.303 \
+    #     -incrementid \
+    #     -firstnodeid $(( 1 << 33 )) \
+    #     -firstwayid $(( 1 << 33 )) \
+    #     -maxwaynodes 256 \
+    #     -o /contours/osm/cnt.osm
+    # phyghtmap --polygon=/data.poly -j 2 -s 10 -0 --source=view3 --max-nodes-per-tile=0 --max-nodes-per-way=0 --pbf
     exit 0
 fi
 if [ "$1" = "contours_import" ]; then
-    initDB
+    waitDB
     # Import contours
-    sudo -u postgres psql -c "DROP DATABASE IF EXISTS contours;"
-    sudo -u postgres createdb -E UTF8 -O renderer contours
-    sudo -u postgres psql -d contours -c "CREATE EXTENSION postgis;"
-    sudo -u renderer osm2pgsql -d contours --slim --cache 5000 --number-processes ${THREADS:-4} --style /home/renderer/src/cyclosm-cartocss-style/dem/contours.style /contours/osm/*
-    sudo -u postgres psql -d contours -c "ALTER TABLE planet_osm_line RENAME COLUMN way TO geometry;"
-    sudo -u postgres psql -d contours -c "ALTER TABLE planet_osm_line RENAME TO contours;"
+    psql -c "DROP DATABASE IF EXISTS contours;"
+    createdb -E UTF8 -O renderer contours
+    psql -d contours -c "CREATE EXTENSION postgis;"
+    psql -d contours -c "CREATE EXTENSION hstore;"
+    
+    cd /contours/srtm_30m_contours_10m
+
+    #shp2pgsql -p -I -g way -s 4326:900913 contour.shp contour > cnt1.sql
+    #shp2pgsql -a -g way -s 4326:900913 contour.shp contour > cnt2.sql
+    psql -d contours -f cnt1.sql
+    psql -d contours -f cnt2.sql
+    
+    #osm2pgsql -d contours --slim --cache 5000 -x -k --number-processes ${THREADS:-4} --style /home/renderer/src/cyclosm-cartocss-style/dem/contours.style /contours/osm/cnt.osm.pbf
+    psql -d contours -c "ALTER TABLE contour RENAME COLUMN way TO geometry;"
+    psql -d contours -c "ALTER TABLE contour RENAME TO contours;"
     exit 0
 fi
 if [ "$1" = "run" ]; then
     # Clean /tmp
     rm -rf /tmp/*
-
-    # Fix postgres data privileges
-    chown postgres:postgres /var/lib/postgresql -R
-
+    waitDB
     # Configure Apache CORS
     if [ "$ALLOW_CORS" == "enabled" ] || [ "$ALLOW_CORS" == "1" ]; then
         echo "export APACHE_ARGUMENTS='-D ALLOW_CORS'" >> /etc/apache2/envvars
     fi
 
-    # Initialize PostgreSQL and Apache
-    createPostgresConfig
-    service postgresql start
+    # Initialize Apache
     service apache2 restart
-    setPostgresPassword
 
     # Configure renderd threads
     sed -i -E "s/num_threads=[0-9]+/num_threads=${THREADS:-4}/g" /usr/local/etc/renderd.conf
